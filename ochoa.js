@@ -1,56 +1,52 @@
-import { createAuthenticatedClient, isFinalizedGrant } from "@interledger/open-payments";
-import { error } from "console";
-import * as fs from "fs";
-import * as readline from 'node:readline/promises';
+import {
+    createAuthenticatedClient,
+    isFinalizedGrant,
+} from "@interledger/open-payments"
+import { error } from "console"
 
 export async function pay(sender, receiver, amount) {
-
-    // const walletUser = await rl.question("Introduce el nombre de tu wallet: ");
-    // const walletReceptor = await rl.question("A que wallet quieres transferir? ")
-    // const cantidad = await rl.question("Cuanto dinero quieres mandar en moneda del receptor? ");
-    const walletUser = sender;
-    const walletReceptor = receiver;
-    const cantidad = amount;
-
+    const walletUser = sender
+    const walletReceptor = receiver
+    const cantidad = amount
 
     //llamando al cliente
-    const privateKey = fs.readFileSync("private.key", "utf8");
     const client = await createAuthenticatedClient({
         walletAddressUrl: "https://ilp.interledger-test.dev/pingadeburra",
-        privateKey: 'private.key',
-        keyId: "b1457224-38ae-40eb-8799-471a8296e325"
+        privateKey: "private.key",
+        keyId: "73f3da3a-034b-4b45-a71f-79863d1fe39e",
     })
+
     //consultar el endpoint de cada billetera / consecion para pago entrante - wallet address
     const sendingWalletAddress = await client.walletAddress.get({
-        url: `https://ilp.interledger-test.dev/${walletUser}`
+        url: walletUser,
     })
     const receivingWalletAddress = await client.walletAddress.get({
-        url: `https://ilp.interledger-test.dev/${walletReceptor}`
+        url: walletReceptor,
     })
-    console.log({sendingWalletAddress, receivingWalletAddress});
+    console.log({ sendingWalletAddress, receivingWalletAddress })
 
     //consecion para el pago entrante - incoming payment
     const incomingPaymentGrant = await client.grant.request(
         {
-        url: receivingWalletAddress.authServer,
+            url: receivingWalletAddress.authServer,
         },
         {
-            access_token:{
+            access_token: {
                 access: [
                     {
                         type: "incoming-payment",
                         actions: ["create"],
-                    }
-                ]
-            }
-        }
-    );
+                    },
+                ],
+            },
+        },
+    )
 
-    if(!isFinalizedGrant(incomingPaymentGrant)){
-        throw new error("se espera se finalice la concesion");
+    if (!isFinalizedGrant(incomingPaymentGrant)) {
+        throw new error("se espera se finalice la concesion")
     }
 
-    console.log(incomingPaymentGrant);
+    console.log(incomingPaymentGrant)
 
     //crear pago entrante para el receptor
     const incomingPayment = await client.incomingPayment.create(
@@ -65,9 +61,9 @@ export async function pay(sender, receiver, amount) {
                 assetScale: receivingWalletAddress.assetScale,
                 value: `${cantidad}00`,
             },
-        }
-    );
-    console.log({incomingPayment})
+        },
+    )
+    console.log({ incomingPayment })
     //crear concesion para una cotizacion
     const quoteGrant = await client.grant.request(
         {
@@ -79,15 +75,15 @@ export async function pay(sender, receiver, amount) {
                     {
                         type: "quote",
                         actions: ["create"],
-                    }
-                ]
-            }
-        }
-    );
-    if (!isFinalizedGrant(quoteGrant)){
-        throw new error("se espera se finalice la concesion");
+                    },
+                ],
+            },
+        },
+    )
+    if (!isFinalizedGrant(quoteGrant)) {
+        throw new error("se espera se finalice la concesion")
     }
-    console.log({quoteGrant});
+    console.log({ quoteGrant })
     //obtener una cotizacion para el remitente
 
     const quote = await client.quote.create(
@@ -99,10 +95,12 @@ export async function pay(sender, receiver, amount) {
             walletAddress: sendingWalletAddress.id,
             receiver: incomingPayment.id,
             method: "ilp",
-        }
-    );
+        },
+    )
 
-    console.log({quote});
+    console.log({ quote })
+
+    const nonce = Date.now()
 
     //obtener una concesion para un pago saliente
     const outgoingPaymentGrant = await client.grant.request(
@@ -119,43 +117,67 @@ export async function pay(sender, receiver, amount) {
                             debitAmount: quote.debitAmount,
                         },
                         identifier: sendingWalletAddress.id,
-                    }
-                ]
+                    },
+                ],
             },
             interact: {
                 start: ["redirect"],
+                finish: {
+                    method: "redirect",
+                    uri: "myapp://callback", // 🙏🙏🙏
+                    nonce: nonce.toString(),
+                },
             },
-        }
-    );
-    console.log({outgoingPaymentGrant});
-
-    //continuar con la concesion del pago saliente
-    await readline
-        .createInterface({
-            input: process.stdin,
-            output: process.stdout
-        })
-        .question("Press enter para salir del pago saliente")
-    //finalizar la concesion del pago saliente
-    const finalized = await client.grant.continue({
-        url: outgoingPaymentGrant.continue.uri,
-        accessToken: outgoingPaymentGrant.continue.access_token.value,
-    });
-    if (!isFinalizedGrant(finalized)){
-        throw new Error("se espera se finalice la concesion");
-    }
-
-    //continuar con la cotizacion de pago saliente
-    const outgoingPayment = await client.outgoingPayment.create(
-        {
-            url: sendingWalletAddress.resourceServer,
-            accessToken: finalized.access_token.value,
         },
-        {
-            walletAddress: sendingWalletAddress.id,
-            quoteId: quote.id,
-        }
-    );
+    )
+    console.log({ outgoingPaymentGrant })
 
-    console.log({outgoingPayment});
+    // FRIST PHASE END
+    return {
+        id: nonce,
+        client,
+        outgoingPaymentGrant,
+        sendingWalletAddress,
+        quote,
+    }
+}
+
+export async function finishPayment(
+    client,
+    outgoingPaymentGrant,
+    sendingWalletAddress,
+    quote,
+    interact_ref,
+) {
+    //finalizar la concesion del pago saliente
+    try {
+        const finalized = await client.grant.continue({
+            url: outgoingPaymentGrant.continue.uri,
+            accessToken: outgoingPaymentGrant.continue.access_token.value,
+        }, {
+            interact_ref,
+        })
+        if (!isFinalizedGrant(finalized)) {
+            throw new Error("se espera se finalice la concesion")
+        }
+
+        //continuar con la cotizacion de pago saliente
+        const outgoingPayment = await client.outgoingPayment.create(
+            {
+                url: sendingWalletAddress.resourceServer,
+                accessToken: finalized.access_token.value,
+            },
+            {
+                walletAddress: sendingWalletAddress.id,
+                quoteId: quote.id,
+            },
+        )
+
+        console.log({ outgoingPayment })
+        return {
+            status: "ok",
+        }
+    } catch (e) {
+        console.log(e)
+    }
 }
